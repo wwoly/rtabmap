@@ -5606,9 +5606,11 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 
 				for(std::map<int, MarkerInfo>::iterator iter=markers.begin(); iter!=markers.end(); ++iter)
 				{
-					if(iter->first <= 0)
+					// Landmark ids are stored negated, so marker 0 cannot be used as is: it is mapped to 100000 (skanneri)
+					int markerId = iter->first == 0 ? 100000 : iter->first;
+					if(markerId < 0)
 					{
-						UERROR("Invalid marker received! IDs should be > 0 (it is %d). Ignoring this marker.", iter->first);
+						UERROR("Invalid marker received! IDs should be >= 0 (it is %d). Ignoring this marker.", iter->first);
 						continue;
 					}
 					cv::Mat covariance = cv::Mat::eye(6,6,CV_64FC1);
@@ -5638,7 +5640,7 @@ Signature * Memory::createSignature(const SensorData & inputData, const Transfor
 						covariance(cv::Range(0,3), cv::Range(0,3)) *= _markerLinVariance;
 						covariance(cv::Range(3,6), cv::Range(3,6)) *= _markerAngVariance;
 					}
-					landmarks.insert(std::make_pair(iter->first, Landmark(iter->first, iter->second.length(), iter->second.pose(), covariance)));
+					landmarks.insert(std::make_pair(markerId, Landmark(markerId, iter->second.length(), iter->second.pose(), covariance)));
 				}
 				UDEBUG("Markers detected = %d", (int)markers.size());
 			}
