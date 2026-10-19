@@ -1759,6 +1759,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             self.rtabmap!.setDataRecorderMode(enabled: dataRecordingMode)
             self.optimizedGraphShown = true // Always reset to true when opening a database
             self.rtabmap!.openDatabase(databasePath: tmpDatabase.path, databaseInMemory: inMemory, optimize: false, clearDatabase: true)
+            self.scanRecorder.reset()
             
             if(!(self.mState == State.STATE_CAMERA || self.mState == State.STATE_MAPPING))
             {
@@ -1886,6 +1887,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             }
             self.updateDatabases()
             self.updateState(state: self.mDataRecording ? .STATE_WELCOME : previousState)
+            self.scanRecorder.package(database: URL(fileURLWithPath: filePath))
         })
     }
     
@@ -2813,6 +2815,7 @@ final class ScanRecorder {
     var notify: ((String) -> Void)?
     private(set) var running = false
     private var folder: URL?
+    private var folders: [URL] = []
     private var epochOffset: TimeInterval = 0
     private var recorder: AVAudioRecorder?
     private var motionFile: FileHandle?
@@ -2849,6 +2852,7 @@ final class ScanRecorder {
             return
         }
         folder = dir
+        folders.append(dir)
         epochOffset = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
         writeJSON(["epoch_offset": epochOffset, "alku_epoch": Date().timeIntervalSince1970, "versio": "skanneri-1"],
                   to: dir.appendingPathComponent("istunto.json"))
@@ -2881,6 +2885,28 @@ final class ScanRecorder {
 
     func requestPhoto() {
         photoRequested = true
+    }
+
+    /// Forget folders of the previous scan (called when a new scan starts).
+    func reset() {
+        folders = []
+    }
+
+    /// Zip the saved database and this scan's recorder folders to Documents/<database name>.zip.
+    /// Runs on the recorder queue, after the CSV files queued by stop() are closed.
+    func package(database: URL) {
+        let name = database.deletingPathExtension().lastPathComponent
+        let paths = [database] + folders
+        queue.async {
+            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            try? FileManager.default.removeItem(at: docs.appendingPathComponent(name + ".zip"))
+            do {
+                let zip = try Zip.quickZipFiles(paths, fileName: name)
+                self.notify?("Saved \(zip.lastPathComponent) (\(zip.fileSizeString))")
+            } catch {
+                self.notify?("Could not create \(name).zip: \(error.localizedDescription)")
+            }
+        }
     }
 
     func process(frame: ARFrame, session: ARSession) {
