@@ -2816,6 +2816,8 @@ final class ScanRecorder {
     static var audioEnabled: Bool { UserDefaults.standard.object(forKey: "RecordAudio") as? Bool ?? true }
     static var photosEnabled: Bool { UserDefaults.standard.object(forKey: "HighResPhotos") as? Bool ?? true }
     /// Video format recommended for high-resolution capture; off by default because it may degrade tracking
+    /// Take photos automatically when the device is still; off by default (camera button only)
+    static var autoPhotosEnabled: Bool { UserDefaults.standard.object(forKey: "AutoPhotos") as? Bool ?? false }
     static var highResFormatEnabled: Bool { UserDefaults.standard.object(forKey: "HighResVideoFormat") as? Bool ?? false }
 
     var notify: ((String) -> Void)?
@@ -2861,7 +2863,8 @@ final class ScanRecorder {
         folders.append(dir)
         epochOffset = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
         var info: [String: Any] = ["epoch_offset": epochOffset, "alku_epoch": Date().timeIntervalSince1970, "versio": "skanneri-2",
-                                   "high_res_photos": ScanRecorder.photosEnabled, "high_res_format": ScanRecorder.highResFormatEnabled]
+                                   "high_res_photos": ScanRecorder.photosEnabled, "high_res_format": ScanRecorder.highResFormatEnabled,
+                                   "auto_photos": ScanRecorder.autoPhotosEnabled]
         if let format = configuration?.videoFormat {
             info["video_format"] = ScanRecorder.describe(format)
         }
@@ -2944,7 +2947,7 @@ final class ScanRecorder {
 
         guard ScanRecorder.photosEnabled, !photoPending else { return }
         var trigger = photoRequested
-        if let since = stillSince, t - since >= stillTime {
+        if ScanRecorder.autoPhotosEnabled, let since = stillSince, t - since >= stillTime {
             if let previous = lastPhoto {
                 trigger = trigger || (t - previous.t >= minPhotoInterval &&
                     (simd_distance(ScanRecorder.position(pose), ScanRecorder.position(previous.pose)) >= minPhotoDistance ||

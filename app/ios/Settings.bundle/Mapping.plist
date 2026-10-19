@@ -42,7 +42,7 @@
 			<key>Type</key>
 			<string>PSGroupSpecifier</string>
 			<key>FooterText</key>
-			<string>Record audio and take high-resolution photos (when still or with the camera button) while mapping. Files are saved in Documents/skanneri.</string>
+			<string>Record audio and take high-resolution photos with the camera button (optionally also automatically when still) while mapping. High-Res Video Format gives 12 MP photos but degraded tracking in our tests. Files are saved in Documents/skanneri.</string>
 		</dict>
 		<dict>
 			<key>Type</key>
@@ -63,6 +63,16 @@
 			<string>HighResPhotos</string>
 			<key>DefaultValue</key>
 			<true/>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Auto Photos When Still</string>
+			<key>Key</key>
+			<string>AutoPhotos</string>
+			<key>DefaultValue</key>
+			<false/>
 		</dict>
 		<dict>
 			<key>Type</key>
