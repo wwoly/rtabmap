@@ -66,6 +66,16 @@
 		</dict>
 		<dict>
 			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>High-Res Video Format</string>
+			<key>Key</key>
+			<string>HighResVideoFormat</string>
+			<key>DefaultValue</key>
+			<false/>
+		</dict>
+		<dict>
+			<key>Type</key>
 			<string>PSGroupSpecifier</string>
 			<key>FooterText</key>
 			<string>When this is disabled (or the phone doesn&apos;t have LiDAR), only tracked features from ARKit will be mapped into a point cloud.</string>
