@@ -2795,6 +2795,10 @@ extension ViewController {
             button.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
             button.centerYAnchor.constraint(equalTo: view.centerYAnchor)])
         photoButton = button
+        if ScanRecorder.audioEnabled {
+            // Ask now: a permission alert while mapping makes the app resign active, which stops the scan
+            AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+        }
         scanRecorder.notify = { [weak self] message in
             DispatchQueue.main.async { self?.showToast(message: message, seconds: 3) }
         }
