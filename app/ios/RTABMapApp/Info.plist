@@ -26,6 +26,8 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>The microphone records your spoken description of the scan.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>The camera is used for scanning (ideally with LiDAR).</string>
 	<key>NSLocationWhenInUseUsageDescription</key>

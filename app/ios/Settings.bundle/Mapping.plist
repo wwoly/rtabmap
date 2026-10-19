@@ -42,6 +42,32 @@
 			<key>Type</key>
 			<string>PSGroupSpecifier</string>
 			<key>FooterText</key>
+			<string>Record audio and take high-resolution photos (when still or with the camera button) while mapping. Files are saved in Documents/skanneri.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>Record Audio</string>
+			<key>Key</key>
+			<string>RecordAudio</string>
+			<key>DefaultValue</key>
+			<true/>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+			<key>Title</key>
+			<string>High-Res Photos</string>
+			<key>Key</key>
+			<string>HighResPhotos</string>
+			<key>DefaultValue</key>
+			<true/>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>FooterText</key>
 			<string>When this is disabled (or the phone doesn&apos;t have LiDAR), only tracked features from ARKit will be mapped into a point cloud.</string>
 		</dict>
 		<dict>
