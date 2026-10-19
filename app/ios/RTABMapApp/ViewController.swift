@@ -627,7 +627,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                     	configuration.frameSemantics = .sceneDepth
                 	}
             	}
-                if #available(iOS 16.0, *), ScanRecorder.photosEnabled,
+                if #available(iOS 16.0, *), ScanRecorder.highResFormatEnabled,
                    let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
                     configuration.videoFormat = format
                 }
@@ -2543,7 +2543,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         rtabmap?.setPausedMapping(paused: false);
         lowMemoryWarningShown = false
         updateState(state: .STATE_MAPPING)
-        scanRecorder.start()
+        scanRecorder.start(configuration: session.configuration)
         photoButton?.isHidden = !ScanRecorder.photosEnabled
     }
     
@@ -2815,6 +2815,8 @@ extension ViewController {
 final class ScanRecorder {
     static var audioEnabled: Bool { UserDefaults.standard.object(forKey: "RecordAudio") as? Bool ?? true }
     static var photosEnabled: Bool { UserDefaults.standard.object(forKey: "HighResPhotos") as? Bool ?? true }
+    /// Video format recommended for high-resolution capture; off by default because it may degrade tracking
+    static var highResFormatEnabled: Bool { UserDefaults.standard.object(forKey: "HighResVideoFormat") as? Bool ?? false }
 
     var notify: ((String) -> Void)?
     private(set) var running = false
@@ -2843,7 +2845,7 @@ final class ScanRecorder {
 
     private static let matrixHeader = (0..<4).flatMap { r in (0..<4).map { c in "m\(r)\(c)" } }.joined(separator: ",")
 
-    func start() {
+    func start(configuration: ARConfiguration? = nil) {
         guard !running else { return }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyMMdd-HHmmss"
@@ -2858,8 +2860,13 @@ final class ScanRecorder {
         folder = dir
         folders.append(dir)
         epochOffset = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
-        writeJSON(["epoch_offset": epochOffset, "alku_epoch": Date().timeIntervalSince1970, "versio": "skanneri-1"],
-                  to: dir.appendingPathComponent("istunto.json"))
+        var info: [String: Any] = ["epoch_offset": epochOffset, "alku_epoch": Date().timeIntervalSince1970, "versio": "skanneri-2",
+                                   "high_res_photos": ScanRecorder.photosEnabled, "high_res_format": ScanRecorder.highResFormatEnabled]
+        if let format = configuration?.videoFormat {
+            info["video_format"] = ScanRecorder.describe(format)
+        }
+        info["supported_formats"] = ARWorldTrackingConfiguration.supportedVideoFormats.map { ScanRecorder.describe($0) }
+        writeJSON(info, to: dir.appendingPathComponent("istunto.json"))
         motionFile = openCSV(dir.appendingPathComponent("liike.csv"), header: "arkit_t,epoch," + ScanRecorder.matrixHeader)
         photoFile = openCSV(dir.appendingPathComponent("kuvat.csv"),
                             header: "tiedosto,arkit_t,epoch," + ScanRecorder.matrixHeader + ",fx,fy,cx,cy,leveys,korkeus")
@@ -3047,6 +3054,18 @@ final class ScanRecorder {
         let d = simd_quatf(b) * simd_quatf(a).inverse
         let x = d.angle
         return min(x, 2 * .pi - x)
+    }
+
+    private static func describe(_ format: ARConfiguration.VideoFormat) -> [String: Any] {
+        var d: [String: Any] = ["width": Int(format.imageResolution.width), "height": Int(format.imageResolution.height),
+                                "fps": format.framesPerSecond]
+        if #available(iOS 14.5, *) {
+            d["device"] = format.captureDeviceType.rawValue
+        }
+        if #available(iOS 16.0, *) {
+            d["high_res_recommended"] = format.isRecommendedForHighResolutionFrameCapturing
+        }
+        return d
     }
 
     private static func freeBytes() -> Int64 {
