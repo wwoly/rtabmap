@@ -7,6 +7,9 @@
 
 import GLKit
 import ARKit
+import AVFoundation
+import CoreImage
+import ImageIO
 import Zip
 import StoreKit
 
@@ -19,6 +22,8 @@ extension Array {
 class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIPickerViewDataSource, UIPickerViewDelegate, CLLocationManagerDelegate {
     
     private let session = ARSession()
+    let scanRecorder = ScanRecorder()
+    var photoButton: UIButton?
     private var locationManager: CLLocationManager?
     private var mLastKnownLocation: CLLocation?
     private var mLastLightEstimate: CGFloat?
@@ -204,6 +209,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         
         super.viewDidLoad()
         // Do any additional setup after loading the view.
+        setupScanRecorder()
         
         self.toastLabel.isHidden = true
         session.delegate = self
@@ -621,6 +627,10 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                     	configuration.frameSemantics = .sceneDepth
                 	}
             	}
+                if #available(iOS 16.0, *), ScanRecorder.photosEnabled,
+                   let format = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing {
+                    configuration.videoFormat = format
+                }
                 
                 session.run(configuration, options: [.resetSceneReconstruction, .resetTracking, .removeExistingAnchors])
                 
@@ -1202,6 +1212,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         {
             rtabmap?.postOdometryEvent(frame: frame, orientation: rotation, viewport: self.view.frame.size)
         }
+        scanRecorder.process(frame: frame, session: session)
         
         if !status.isEmpty {
             DispatchQueue.main.async {
@@ -2089,6 +2100,8 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     
     func stopMapping(ignoreSaving: Bool, offerPostProcessing: Bool = true)
     {
+        scanRecorder.stop()
+        photoButton?.isHidden = true
         session.pause()
         locationManager?.stopUpdatingLocation()
         rtabmap?.setPausedMapping(paused: true)
@@ -2528,6 +2541,8 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         rtabmap?.setPausedMapping(paused: false);
         lowMemoryWarningShown = false
         updateState(state: .STATE_MAPPING)
+        scanRecorder.start()
+        photoButton?.isHidden = !ScanRecorder.photosEnabled
     }
     
     @IBAction func newScanAction(_ sender: UIButton) {
@@ -2760,5 +2775,252 @@ extension SKStoreReviewController {
         if let scene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene {
             requestReview(in: scene)
         }
+    }
+}
+
+// MARK: - Scan recorder: audio and high-resolution photos alongside the RTAB-Map scan
+
+extension ViewController {
+    func setupScanRecorder() {
+        let button = UIButton(type: .system)
+        button.setImage(UIImage(systemName: "camera.circle.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 44)), for: .normal)
+        button.tintColor = .white
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.isHidden = true
+        button.addTarget(self, action: #selector(photoButtonPressed), for: .touchUpInside)
+        view.addSubview(button)
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            button.centerYAnchor.constraint(equalTo: view.centerYAnchor)])
+        photoButton = button
+        scanRecorder.notify = { [weak self] message in
+            DispatchQueue.main.async { self?.showToast(message: message, seconds: 3) }
+        }
+    }
+
+    @objc func photoButtonPressed() {
+        scanRecorder.requestPhoto()
+    }
+}
+
+/// Writes Documents/skanneri/<yyMMdd-HHmmss>/ while mapping: istunto.json, liike.csv (ARKit camera pose at 10 Hz),
+/// puhe.wav (16 kHz mono PCM, start time in aani.json) and kuvat/*.jpg with kuvat.csv (high-resolution photos).
+/// All times are epoch seconds on the same clock as RTAB-Map node stamps (see CameraMobile stampEpochOffset_).
+final class ScanRecorder {
+    static var audioEnabled: Bool { UserDefaults.standard.object(forKey: "RecordAudio") as? Bool ?? true }
+    static var photosEnabled: Bool { UserDefaults.standard.object(forKey: "HighResPhotos") as? Bool ?? true }
+
+    var notify: ((String) -> Void)?
+    private(set) var running = false
+    private var folder: URL?
+    private var epochOffset: TimeInterval = 0
+    private var recorder: AVAudioRecorder?
+    private var motionFile: FileHandle?
+    private var photoFile: FileHandle?
+    private let queue = DispatchQueue(label: "skanneri.recorder")
+    private let ciContext = CIContext()
+
+    // Automatic photo: still for 0.4 s, at least 1 s and 0.3 m or 15 deg from the previous photo
+    private var lastSample: (t: TimeInterval, pose: simd_float4x4)?
+    private var stillSince: TimeInterval?
+    private var lastPhoto: (t: TimeInterval, pose: simd_float4x4)?
+    private var photoPending = false
+    private var photoRequested = false
+    private let maxSpeed: Float = 0.05
+    private let maxTurnRate: Float = 10 * .pi / 180
+    private let stillTime: TimeInterval = 0.4
+    private let minPhotoInterval: TimeInterval = 1.0
+    private let minPhotoDistance: Float = 0.3
+    private let minPhotoTurn: Float = 15 * .pi / 180
+    private let minFreeBytes: Int64 = 2_000_000_000
+
+    private static let matrixHeader = (0..<4).flatMap { r in (0..<4).map { c in "m\(r)\(c)" } }.joined(separator: ",")
+
+    func start() {
+        guard !running else { return }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyMMdd-HHmmss"
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let dir = docs.appendingPathComponent("skanneri").appendingPathComponent(formatter.string(from: Date()))
+        do {
+            try FileManager.default.createDirectory(at: dir.appendingPathComponent("kuvat"), withIntermediateDirectories: true)
+        } catch {
+            notify?("Scan recorder: could not create folder")
+            return
+        }
+        folder = dir
+        epochOffset = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
+        writeJSON(["epoch_offset": epochOffset, "alku_epoch": Date().timeIntervalSince1970, "versio": "skanneri-1"],
+                  to: dir.appendingPathComponent("istunto.json"))
+        motionFile = openCSV(dir.appendingPathComponent("liike.csv"), header: "arkit_t,epoch," + ScanRecorder.matrixHeader)
+        photoFile = openCSV(dir.appendingPathComponent("kuvat.csv"),
+                            header: "tiedosto,arkit_t,epoch," + ScanRecorder.matrixHeader + ",fx,fy,cx,cy,leveys,korkeus")
+        running = true
+        if ScanRecorder.audioEnabled {
+            startAudio(dir)
+        }
+    }
+
+    func stop() {
+        guard running else { return }
+        running = false
+        recorder?.stop()
+        recorder = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        queue.async {
+            self.motionFile?.closeFile()
+            self.motionFile = nil
+            self.photoFile?.closeFile()
+            self.photoFile = nil
+        }
+        lastSample = nil
+        stillSince = nil
+        lastPhoto = nil
+        photoRequested = false
+    }
+
+    func requestPhoto() {
+        photoRequested = true
+    }
+
+    func process(frame: ARFrame, session: ARSession) {
+        guard running else { return }
+        let t = frame.timestamp
+        let pose = frame.camera.transform
+        if let last = lastSample, t - last.t < 0.1 {
+            return
+        }
+        let line = String(format: "%.6f,%.6f,", t, t + epochOffset) + ScanRecorder.matrixString(pose) + "\n"
+        queue.async { self.motionFile?.write(line.data(using: .utf8)!) }
+
+        if let last = lastSample {
+            let dt = Float(t - last.t)
+            let speed = simd_distance(ScanRecorder.position(pose), ScanRecorder.position(last.pose)) / dt
+            let turnRate = ScanRecorder.angle(last.pose, pose) / dt
+            if speed < maxSpeed && turnRate < maxTurnRate {
+                stillSince = stillSince ?? last.t
+            } else {
+                stillSince = nil
+            }
+        }
+        lastSample = (t, pose)
+
+        guard ScanRecorder.photosEnabled, !photoPending else { return }
+        var trigger = photoRequested
+        if let since = stillSince, t - since >= stillTime {
+            if let previous = lastPhoto {
+                trigger = trigger || (t - previous.t >= minPhotoInterval &&
+                    (simd_distance(ScanRecorder.position(pose), ScanRecorder.position(previous.pose)) >= minPhotoDistance ||
+                     ScanRecorder.angle(previous.pose, pose) >= minPhotoTurn))
+            } else {
+                trigger = true
+            }
+        }
+        if trigger {
+            if #available(iOS 16.0, *) {
+                capturePhoto(session)
+            }
+        }
+    }
+
+    @available(iOS 16.0, *)
+    private func capturePhoto(_ session: ARSession) {
+        photoRequested = false
+        guard let dir = folder, ScanRecorder.freeBytes() > minFreeBytes else { return }
+        photoPending = true
+        let offset = epochOffset
+        session.captureHighResolutionFrame { frame, error in
+            guard let frame = frame else {
+                print("Scan recorder: high-resolution capture failed: \(String(describing: error))")
+                DispatchQueue.main.async { self.photoPending = false }
+                return
+            }
+            let t = frame.timestamp
+            let pose = frame.camera.transform
+            let K = frame.camera.intrinsics
+            let width = CVPixelBufferGetWidth(frame.capturedImage)
+            let height = CVPixelBufferGetHeight(frame.capturedImage)
+            let name = String(format: "%.0f.jpg", (t + offset) * 1000)
+            let image = CIImage(cvPixelBuffer: frame.capturedImage)
+            DispatchQueue.main.async { self.lastPhoto = (t, pose) }
+            self.queue.async {
+                let quality = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
+                if let jpeg = self.ciContext.jpegRepresentation(of: image, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                                                options: [quality: 0.9]) {
+                    do {
+                        try jpeg.write(to: dir.appendingPathComponent("kuvat").appendingPathComponent(name))
+                        let line = name + String(format: ",%.6f,%.6f,", t, t + offset) + ScanRecorder.matrixString(pose) +
+                            String(format: ",%.3f,%.3f,%.3f,%.3f,%ld,%ld\n", K[0][0], K[1][1], K[2][0], K[2][1], width, height)
+                        self.photoFile?.write(line.data(using: .utf8)!)
+                    } catch {
+                        print("Scan recorder: could not write \(name): \(error)")
+                    }
+                }
+                DispatchQueue.main.async { self.photoPending = false }
+            }
+        }
+    }
+
+    private func startAudio(_ dir: URL) {
+        AVAudioSession.sharedInstance().requestRecordPermission { granted in
+            DispatchQueue.main.async {
+                guard self.running else { return }
+                guard granted else {
+                    self.notify?("Microphone permission denied: scanning without audio")
+                    return
+                }
+                do {
+                    let audioSession = AVAudioSession.sharedInstance()
+                    try audioSession.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker])
+                    try audioSession.setActive(true)
+                    let settings: [String: Any] = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000.0,
+                                                   AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16,
+                                                   AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false]
+                    let recorder = try AVAudioRecorder(url: dir.appendingPathComponent("puhe.wav"), settings: settings)
+                    let startEpoch = Date().timeIntervalSince1970
+                    if recorder.record() {
+                        self.recorder = recorder
+                        self.writeJSON(["alku_epoch": startEpoch], to: dir.appendingPathComponent("aani.json"))
+                    } else {
+                        self.notify?("Audio recording did not start")
+                    }
+                } catch {
+                    self.notify?("Audio recording did not start: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func openCSV(_ url: URL, header: String) -> FileHandle? {
+        FileManager.default.createFile(atPath: url.path, contents: (header + "\n").data(using: .utf8))
+        let handle = try? FileHandle(forWritingTo: url)
+        handle?.seekToEndOfFile()
+        return handle
+    }
+
+    private func writeJSON(_ object: [String: Any], to url: URL) {
+        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: url)
+        }
+    }
+
+    private static func matrixString(_ m: simd_float4x4) -> String {
+        // Row-major m00..m33; simd stores columns, so m[c][r] is row r, column c
+        (0..<4).flatMap { r in (0..<4).map { c in String(format: "%.6f", m[c][r]) } }.joined(separator: ",")
+    }
+
+    private static func position(_ m: simd_float4x4) -> simd_float3 {
+        simd_float3(m.columns.3.x, m.columns.3.y, m.columns.3.z)
+    }
+
+    private static func angle(_ a: simd_float4x4, _ b: simd_float4x4) -> Float {
+        let d = simd_quatf(b) * simd_quatf(a).inverse
+        let x = d.angle
+        return min(x, 2 * .pi - x)
+    }
+
+    private static func freeBytes() -> Int64 {
+        let values = try? URL(fileURLWithPath: NSHomeDirectory()).resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return values?.volumeAvailableCapacityForImportantUsage ?? 0
     }
 }
