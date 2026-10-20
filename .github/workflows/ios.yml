@@ -102,6 +102,8 @@ jobs:
           APP_DIR="build/Build/Products/Release-iphoneos"
           rm -rf Payload && mkdir Payload
           cp -R "$APP_DIR/RTABMapApp.app" Payload/
+          # Build identity for the scan recorder's istunto.json (commit and run)
+          /usr/libexec/PlistBuddy -c "Add :SkanneriCommit string ${GITHUB_SHA}" -c "Add :SkanneriRun string ${GITHUB_RUN_ID}" Payload/RTABMapApp.app/Info.plist
           # Unsigned .ipa: not installable as-is, but ready for later (re)signing.
           zip -q -r RTABMapApp-unsigned.ipa Payload
 

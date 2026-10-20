@@ -153,6 +153,8 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     }
     
     func showToast(message : String, seconds: Double){
+        // Logged even when not shown: a visible toast hides the next one
+        scanRecorder.event("ilmoitus", message)
         if(!self.toastLabel.isHidden)
         {
             return;
@@ -405,7 +407,9 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             {
                 self.updateState(state: self.mState) // refesh menus and actions
             }
-            
+            self.scanRecorder.stats(nodes: nodes, nodesDrawn: nodesDrawn, words: words, points: points, polygons: polygons,
+                                    updateTime: updateTime, fps: fps, databaseMemoryUsed: databaseMemoryUsed)
+
             self.statusLabel.text = ""
             if self.statusShown {
                 self.statusLabel.text =
@@ -506,10 +510,11 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                     + "low (\(availableMem) MB). You should be able to save the database but some post-processing and exporting options may fail. "
                     + "\n\nNote that for large environments, you can save multiple databases and "
                     + "merge them with RTAB-Map Desktop version."
+                    self.scanRecorder.event("halytys", "Memory is full: \(availableMem) MB free, scanning will be stopped")
                     let alert = UIAlertController(title: "Memory is full!", message: msg, preferredStyle: .alert)
                     let alertActionYes = UIAlertAction(title: "Ok", style: .default) {
                         (UIAlertAction) -> Void in
-                        self.stopMapping(ignoreSaving: false, offerPostProcessing: false);
+                        self.stopMapping(ignoreSaving: false, offerPostProcessing: false, reason: "memory full (under 400 MB free)");
                     }
                     alert.addAction(alertActionYes)
                     self.present(alert, animated: true, completion: nil)
@@ -522,14 +527,16 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
                     + "have enough memory to work correctly. If you just want to save the database "
                     + "after scanning, you can continue until the next warning.\n\n"
                     + "Note that showing only point clouds and/or decrease density reduce memory needed for rendering."
+                    self.scanRecorder.event("halytys", "Memory warning: \(availableMem) MB free, \(usedMem) MB used (free under 3x used)")
                     let alert = UIAlertController(title: "Memory is full!", message: msg, preferredStyle: .alert)
                     let alertActionYes = UIAlertAction(title: "Stop Now", style: .default) {
                         (UIAlertAction) -> Void in
-                        self.stopMapping(ignoreSaving: false);
+                        self.stopMapping(ignoreSaving: false, reason: "memory warning: Stop Now");
                     }
                     alert.addAction(alertActionYes)
                     let alertActionNo = UIAlertAction(title: "Continue", style: .cancel) {
                         (UIAlertAction) -> Void in
+                        self.scanRecorder.event("valinta", "memory warning: Continue")
                     }
                     alert.addAction(alertActionNo)
                     self.present(alert, animated: true, completion: nil)
@@ -539,6 +546,10 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     }
     
     func cameraInfoEventReceived(_ rtabmap: RTABMap, type: Int, key: String, value: String) {
+        if(key == "UpstreamRelocationFiltered")
+        {
+            scanRecorder.event("arkit_hyppy_suodatettu", "acceleration \(value)")
+        }
         if(self.debugShown && key == "UpstreamRelocationFiltered")
         {
             DispatchQueue.main.async {
@@ -556,7 +567,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         print("appMovedToBackground()")
         if(mState == .STATE_VISUALIZING_CAMERA || mState == .STATE_VISUALIZING_AND_MEASURING || mState == .STATE_MAPPING || mState == .STATE_CAMERA)
         {
-            stopMapping(ignoreSaving: true)
+            stopMapping(ignoreSaving: true, reason: "app resigned active (background, Control Center, alert or camera stop)")
         }
     }
     
@@ -1180,6 +1191,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     //This is called when a new frame has been updated.
     func session(_ session: ARSession, didUpdate frame: ARFrame)
     {
+        let started = CACurrentMediaTime()
         var status = ""
         var accept = false
         
@@ -1212,8 +1224,8 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         {
             rtabmap?.postOdometryEvent(frame: frame, orientation: rotation, viewport: self.view.frame.size)
         }
-        scanRecorder.process(frame: frame, session: session)
-        
+        scanRecorder.process(frame: frame, session: session, processingTime: CACurrentMediaTime() - started)
+
         if !status.isEmpty {
             DispatchQueue.main.async {
                 self.showToast(message: status, seconds: 2)
@@ -1232,6 +1244,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             errorWithInfo.localizedRecoverySuggestion
         ]
         let errorMessage = messages.compactMap({ $0 }).joined(separator: "\n")
+        scanRecorder.event("ar_virhe", errorMessage)
         DispatchQueue.main.async {
             // Present an alert informing about the error that has occurred.
             let alertController = UIAlertController(title: "The AR session failed.", message: errorMessage, preferredStyle: .alert)
@@ -1245,7 +1258,15 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             self.present(alertController, animated: true, completion: nil)
         }
     }
-    
+
+    func sessionWasInterrupted(_ session: ARSession) {
+        scanRecorder.event("ar_keskeytys", "AR session interrupted")
+    }
+
+    func sessionInterruptionEnded(_ session: ARSession) {
+        scanRecorder.event("ar_keskeytys", "AR session interruption ended")
+    }
+
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation])
     {
         mLastKnownLocation = locations.last!
@@ -1872,7 +1893,7 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             
             self.openedDatabasePath = URL(fileURLWithPath: filePath)
             
-            let alert = UIAlertController(title: "Database saved!", message: String(format: "Database \"%@\" successfully saved!", fileName), preferredStyle: .alert)
+            let alert = UIAlertController(title: "Database saved!", message: String(format: "Database \"%@\" successfully saved! The zip is being packed as %@-kesken.zip and is ready when it is renamed %@.zip in Files.", fileName, (fileName as NSString).deletingPathExtension, (fileName as NSString).deletingPathExtension), preferredStyle: .alert)
             let yes = UIAlertAction(title: "OK", style: .default) {
                 (UIAlertAction) -> Void in
             }
@@ -2100,9 +2121,9 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
         })
     }
     
-    func stopMapping(ignoreSaving: Bool, offerPostProcessing: Bool = true)
+    func stopMapping(ignoreSaving: Bool, offerPostProcessing: Bool = true, reason: String = "")
     {
-        scanRecorder.stop()
+        scanRecorder.stop(reason: reason)
         photoButton?.isHidden = true
         session.pause()
         locationManager?.stopUpdatingLocation()
@@ -2189,9 +2210,10 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
     func openDatabase(fileUrl: URL) {
         
         if(mState == .STATE_CAMERA) {
-            stopMapping(ignoreSaving: true)
+            stopMapping(ignoreSaving: true, reason: "database opened")
         }
-        
+        scanRecorder.reset() // recorder folders of earlier scans belong to their own zips
+
         openedDatabasePath = fileUrl;
         let fileName: String = self.openedDatabasePath!.lastPathComponent
         
@@ -2536,14 +2558,14 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
 
     //MARK: Actions   
     @IBAction func stopAction(_ sender: UIButton) {
-        stopMapping(ignoreSaving: false)
+        stopMapping(ignoreSaving: false, reason: "stop button")
     }
 
     @IBAction func recordAction(_ sender: UIButton) {
         rtabmap?.setPausedMapping(paused: false);
         lowMemoryWarningShown = false
         updateState(state: .STATE_MAPPING)
-        scanRecorder.start(configuration: session.configuration)
+        scanRecorder.start(configuration: session.configuration, dataRecording: mDataRecording)
         photoButton?.isHidden = !ScanRecorder.photosEnabled
     }
     
@@ -2809,15 +2831,17 @@ extension ViewController {
     }
 }
 
-/// Writes Documents/skanneri/<yyMMdd-HHmmss>/ while mapping: istunto.json, asetukset.json (app settings), liike.csv (ARKit camera pose at 10 Hz),
+/// Writes Documents/skanneri/<yyMMdd-HHmmss>/ while mapping: istunto.json (device, build, formats), asetukset.json (app settings),
+/// liike.csv (ARKit camera pose at 10 Hz), tila.csv (memory, heat, battery, frame rate, tracking and map stats at 1 Hz),
+/// tapahtumat.csv (toasts, alerts, tracking changes, interruptions and why mapping stopped), loki.txt (native stderr),
 /// puhe.wav (16 kHz mono PCM, start time in aani.json) and kuvat/*.jpg with kuvat.csv (high-resolution photos).
 /// All times are epoch seconds on the same clock as RTAB-Map node stamps (see CameraMobile stampEpochOffset_).
 final class ScanRecorder {
     static var audioEnabled: Bool { UserDefaults.standard.object(forKey: "RecordAudio") as? Bool ?? true }
     static var photosEnabled: Bool { UserDefaults.standard.object(forKey: "HighResPhotos") as? Bool ?? true }
-    /// Video format recommended for high-resolution capture; off by default because it may degrade tracking
     /// Take photos automatically when the device is still; off by default (camera button only)
     static var autoPhotosEnabled: Bool { UserDefaults.standard.object(forKey: "AutoPhotos") as? Bool ?? false }
+    /// Video format recommended for high-resolution capture; off by default because it may degrade tracking
     static var highResFormatEnabled: Bool { UserDefaults.standard.object(forKey: "HighResVideoFormat") as? Bool ?? false }
 
     var notify: ((String) -> Void)?
@@ -2828,8 +2852,23 @@ final class ScanRecorder {
     private var recorder: AVAudioRecorder?
     private var motionFile: FileHandle?
     private var photoFile: FileHandle?
+    private var statusFile: FileHandle?
+    private var eventFile: FileHandle?
+    private var observers: [NSObjectProtocol] = []
     private let queue = DispatchQueue(label: "skanneri.recorder")
     private let ciContext = CIContext()
+
+    // 1 Hz status (main thread): ARKit frames and the slowest frame since the last row, last values seen
+    private var lastStatus: TimeInterval?
+    private var frameCount = 0
+    private var maxProcessing: TimeInterval = 0
+    private var maxLag: TimeInterval = 0
+    private var trackingState = ""
+    private var mappingStatus = ""
+    private var mapStats = ""
+    private static let mapStatsEmpty = ",,,,,,,"
+    // Last notice written to tapahtumat.csv (recorder queue); the same toast is posted on every frame while tracking is limited
+    private var lastNotice: (text: String, epoch: TimeInterval)?
 
     // Automatic photo: still for 0.4 s, at least 1 s and 0.3 m or 15 deg from the previous photo
     private var lastSample: (t: TimeInterval, pose: simd_float4x4)?
@@ -2847,7 +2886,7 @@ final class ScanRecorder {
 
     private static let matrixHeader = (0..<4).flatMap { r in (0..<4).map { c in "m\(r)\(c)" } }.joined(separator: ",")
 
-    func start(configuration: ARConfiguration? = nil) {
+    func start(configuration: ARConfiguration? = nil, dataRecording: Bool = false) {
         guard !running else { return }
         let formatter = DateFormatter()
         formatter.dateFormat = "yyMMdd-HHmmss"
@@ -2864,38 +2903,107 @@ final class ScanRecorder {
         epochOffset = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
         var info: [String: Any] = ["epoch_offset": epochOffset, "alku_epoch": Date().timeIntervalSince1970, "versio": "skanneri-3",
                                    "high_res_photos": ScanRecorder.photosEnabled, "high_res_format": ScanRecorder.highResFormatEnabled,
-                                   "auto_photos": ScanRecorder.autoPhotosEnabled]
+                                   "auto_photos": ScanRecorder.autoPhotosEnabled, "data_recording": dataRecording]
         if let format = configuration?.videoFormat {
             info["video_format"] = ScanRecorder.describe(format)
         }
         info["supported_formats"] = ARWorldTrackingConfiguration.supportedVideoFormats.map { ScanRecorder.describe($0) }
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        info.merge(ScanRecorder.deviceInfo()) { current, _ in current }
         writeJSON(info, to: dir.appendingPathComponent("istunto.json"))
         writeJSON(["settings": ScanRecorder.settings()], to: dir.appendingPathComponent("asetukset.json"))
         motionFile = openCSV(dir.appendingPathComponent("liike.csv"), header: "arkit_t,epoch," + ScanRecorder.matrixHeader)
         photoFile = openCSV(dir.appendingPathComponent("kuvat.csv"),
-                            header: "tiedosto,arkit_t,epoch," + ScanRecorder.matrixHeader + ",fx,fy,cx,cy,leveys,korkeus")
+                            header: "tiedosto,arkit_t,epoch," + ScanRecorder.matrixHeader + ",fx,fy,cx,cy,leveys,korkeus,syvyys_m,valotus_ms")
+        statusFile = openCSV(dir.appendingPathComponent("tila.csv"),
+                             header: "epoch,arkit_t,kehyksia_s,kasittely_max_ms,viive_max_ms,seuranta,kartoitus,piirteet,valotus_ms,valo,varilampo," +
+                                "muisti_vapaa_mt,muisti_kaytossa_mt,lampo,akku,lataus,virransaasto," +
+                                "solmut,piirretyt,sanat,pisteet,polygonit,paivitys_ms,fps_piirto,tietokanta_mt,levy_vapaa_mt")
+        eventFile = openCSV(dir.appendingPathComponent("tapahtumat.csv"), header: "epoch,tyyppi,teksti")
+        // Native errors (LOGE) go to stderr, which is otherwise lost on the device
+        freopen(dir.appendingPathComponent("loki.txt").path, "a", stderr)
+        setvbuf(stderr, nil, _IOLBF, 0)  // freopen makes stderr buffered; keep lines that precede a crash
+        observe()
         running = true
+        event("aloitus", dir.lastPathComponent)
         if ScanRecorder.audioEnabled {
             startAudio(dir)
         }
     }
 
-    func stop() {
+    func stop(reason: String = "") {
         guard running else { return }
+        event("pysaytys", reason)
         running = false
         recorder?.stop()
         recorder = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        observers = []
         queue.async {
             self.motionFile?.closeFile()
             self.motionFile = nil
             self.photoFile?.closeFile()
             self.photoFile = nil
+            self.statusFile?.closeFile()
+            self.statusFile = nil
+            self.eventFile?.closeFile()
+            self.eventFile = nil
+            self.lastNotice = nil
         }
         lastSample = nil
         stillSince = nil
         lastPhoto = nil
         photoRequested = false
+        photoPending = false
+        lastStatus = nil
+        trackingState = ""
+        mappingStatus = ""
+        mapStats = ""
+    }
+
+    /// Append a row to tapahtumat.csv; callable from any thread. Repeats of the same notice within 2 s are skipped.
+    func event(_ type: String, _ text: String = "") {
+        let epoch = Date().timeIntervalSince1970
+        queue.async {
+            guard let file = self.eventFile else { return }
+            if type == "ilmoitus" {
+                if let last = self.lastNotice, last.text == text, epoch - last.epoch < 2 { return }
+                self.lastNotice = (text, epoch)
+            }
+            let quoted = "\"" + text.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            _ = try? file.write(contentsOf: (String(format: "%.3f,", epoch) + type + "," + quoted + "\n").data(using: .utf8)!)
+        }
+    }
+
+    /// Latest RTAB-Map statistics for tila.csv (main thread, about once per map update).
+    func stats(nodes: Int, nodesDrawn: Int, words: Int, points: Int, polygons: Int, updateTime: Float, fps: Float, databaseMemoryUsed: Int) {
+        guard running else { return }
+        mapStats = String(format: "%ld,%ld,%ld,%ld,%ld,%.0f,%.1f,%ld", nodes, nodesDrawn, words, points, polygons, updateTime, fps, databaseMemoryUsed)
+    }
+
+    private func add(_ name: Notification.Name, _ handler: @escaping (Notification) -> Void) {
+        observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: nil, using: handler))
+    }
+
+    private func observe() {
+        add(ProcessInfo.thermalStateDidChangeNotification) { _ in
+            self.event("lampo", ScanRecorder.thermalName(ProcessInfo.processInfo.thermalState))
+        }
+        add(UIApplication.didReceiveMemoryWarningNotification) { _ in
+            self.event("muistivaroitus", "iOS memory warning, \(os_proc_available_memory() / 1_048_576) MB free")
+        }
+        add(Notification.Name.NSProcessInfoPowerStateDidChange) { _ in
+            self.event("virransaasto", ProcessInfo.processInfo.isLowPowerModeEnabled ? "on" : "off")
+        }
+        add(AVAudioSession.interruptionNotification) { note in
+            let type = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            self.event("aani", type == AVAudioSession.InterruptionType.began.rawValue ? "interruption began" : "interruption ended")
+        }
+        add(AVAudioSession.routeChangeNotification) { note in
+            let reason = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+            self.event("aani", "route change, reason \(reason.map { String($0) } ?? "?")")
+        }
     }
 
     func requestPhoto() {
@@ -2908,31 +3016,43 @@ final class ScanRecorder {
     }
 
     /// Zip the saved database and this scan's recorder folders to Documents/<database name>.zip.
-    /// Runs on the recorder queue, after the CSV files queued by stop() are closed.
+    /// Runs on the recorder queue, after the CSV files queued by stop() are closed. The zip is written as
+    /// <name>-kesken.zip and renamed when complete, so a half-written zip is never copied by mistake.
     func package(database: URL) {
         let name = database.deletingPathExtension().lastPathComponent
         let paths = [database] + folders
         queue.async {
-            let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            try? FileManager.default.removeItem(at: docs.appendingPathComponent(name + ".zip"))
-            do {
-                let zip = try Zip.quickZipFiles(paths, fileName: name)
-                self.notify?("Saved \(zip.lastPathComponent) (\(zip.fileSizeString))")
-            } catch {
-                self.notify?("Could not create \(name).zip: \(error.localizedDescription)")
+            // Stop appending native errors to loki.txt while it is being zipped
+            freopen("/dev/null", "a", stderr)
+            // Zip off the recorder queue, so photos of a scan started meanwhile are not held up
+            DispatchQueue.global(qos: .utility).async {
+                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                let target = docs.appendingPathComponent(name + ".zip")
+                let partial = name + "-kesken"
+                try? FileManager.default.removeItem(at: target)
+                try? FileManager.default.removeItem(at: docs.appendingPathComponent(partial + ".zip"))
+                do {
+                    let zip = try Zip.quickZipFiles(paths, fileName: partial)
+                    try FileManager.default.moveItem(at: zip, to: target)
+                    self.notify?("Saved \(target.lastPathComponent) (\(target.fileSizeString))")
+                } catch {
+                    self.notify?("Could not create \(name).zip: \(error.localizedDescription)")
+                }
             }
         }
     }
 
-    func process(frame: ARFrame, session: ARSession) {
+    /// Called for every ARFrame on the main thread; processingTime is how long RTAB-Map's odometry event took for this frame.
+    func process(frame: ARFrame, session: ARSession, processingTime: TimeInterval = 0) {
         guard running else { return }
         let t = frame.timestamp
         let pose = frame.camera.transform
+        track(frame, processingTime: processingTime)
         if let last = lastSample, t - last.t < 0.1 {
             return
         }
         let line = String(format: "%.6f,%.6f,", t, t + epochOffset) + ScanRecorder.matrixString(pose) + "\n"
-        queue.async { self.motionFile?.write(line.data(using: .utf8)!) }
+        queue.async { _ = try? self.motionFile?.write(contentsOf: line.data(using: .utf8)!) }
 
         if let last = lastSample {
             let dt = Float(t - last.t)
@@ -2959,26 +3079,81 @@ final class ScanRecorder {
         }
         if trigger {
             if #available(iOS 16.0, *) {
-                capturePhoto(session)
+                capturePhoto(session, depth: ScanRecorder.centerDepth(frame))
             }
         }
     }
 
+    /// Frame rate, slowest frame, tracking and world mapping changes; one tila.csv row per second.
+    private func track(_ frame: ARFrame, processingTime: TimeInterval) {
+        let t = frame.timestamp
+        frameCount += 1
+        maxProcessing = max(maxProcessing, processingTime)
+        maxLag = max(maxLag, CACurrentMediaTime() - t)
+        let tracking = ScanRecorder.trackingName(frame.camera.trackingState)
+        if tracking != trackingState {
+            event("seuranta", tracking)
+            trackingState = tracking
+        }
+        let mapping = ScanRecorder.mappingName(frame.worldMappingStatus)
+        if mapping != mappingStatus {
+            event("kartoitus", mapping)
+            mappingStatus = mapping
+        }
+        guard let last = lastStatus else {
+            lastStatus = t
+            return
+        }
+        guard t - last >= 1 else { return }
+        var exposure = ""
+        if #available(iOS 16.0, *) {
+            exposure = String(format: "%.2f", frame.camera.exposureDuration * 1000)
+        }
+        let light = frame.lightEstimate.map { String(format: "%.0f,%.0f", $0.ambientIntensity, $0.ambientColorTemperature) } ?? ","
+        let process = ProcessInfo.processInfo
+        let device = UIDevice.current
+        var fields: [String] = [String(format: "%.3f", t + epochOffset), String(format: "%.6f", t),
+                                String(format: "%.1f", Double(frameCount) / (t - last)),
+                                String(format: "%.1f", maxProcessing * 1000), String(format: "%.1f", maxLag * 1000)]
+        fields += [tracking, mapping, String(frame.rawFeaturePoints?.points.count ?? 0), exposure, light]
+        fields += [String(os_proc_available_memory() / 1_048_576), String(ScanRecorder.footprintMB()), String(process.thermalState.rawValue)]
+        fields += [String(format: "%.2f", device.batteryLevel), String(device.batteryState.rawValue), process.isLowPowerModeEnabled ? "1" : "0"]
+        fields.append(mapStats.isEmpty ? ScanRecorder.mapStatsEmpty : mapStats)
+        let start = fields.joined(separator: ",")
+        queue.async {
+            _ = try? self.statusFile?.write(contentsOf: (start + ",\(ScanRecorder.freeBytes() / 1_048_576)\n").data(using: .utf8)!)
+        }
+        lastStatus = t
+        frameCount = 0
+        maxProcessing = 0
+        maxLag = 0
+    }
+
     @available(iOS 16.0, *)
-    private func capturePhoto(_ session: ARSession) {
+    private func capturePhoto(_ session: ARSession, depth: Float?) {
+        let manual = photoRequested
         photoRequested = false
-        guard let dir = folder, ScanRecorder.freeBytes() > minFreeBytes else { return }
+        guard let dir = folder else { return }
+        guard ScanRecorder.freeBytes() > minFreeBytes else {
+            // Only for button presses: automatic photos would retrigger on every frame
+            if manual {
+                event("kuva", "skipped: less than 2 GB free storage")
+                notify?("Photo skipped: less than 2 GB free storage")
+            }
+            return
+        }
         photoPending = true
         let offset = epochOffset
         session.captureHighResolutionFrame { frame, error in
             guard let frame = frame else {
-                print("Scan recorder: high-resolution capture failed: \(String(describing: error))")
+                self.event("kuva", "capture failed: \(error?.localizedDescription ?? "unknown error")")
                 DispatchQueue.main.async { self.photoPending = false }
                 return
             }
             let t = frame.timestamp
             let pose = frame.camera.transform
             let K = frame.camera.intrinsics
+            let exposure = frame.camera.exposureDuration * 1000
             let width = CVPixelBufferGetWidth(frame.capturedImage)
             let height = CVPixelBufferGetHeight(frame.capturedImage)
             let name = String(format: "%.0f.jpg", (t + offset) * 1000)
@@ -2990,12 +3165,16 @@ final class ScanRecorder {
                                                                 options: [quality: 0.9]) {
                     do {
                         try jpeg.write(to: dir.appendingPathComponent("kuvat").appendingPathComponent(name))
+                        let depthText: String = depth.map { String(format: "%.3f", $0) } ?? ""
                         let line = name + String(format: ",%.6f,%.6f,", t, t + offset) + ScanRecorder.matrixString(pose) +
-                            String(format: ",%.3f,%.3f,%.3f,%.3f,%ld,%ld\n", K[0][0], K[1][1], K[2][0], K[2][1], width, height)
-                        self.photoFile?.write(line.data(using: .utf8)!)
+                            String(format: ",%.3f,%.3f,%.3f,%.3f,%ld,%ld,", K[0][0], K[1][1], K[2][0], K[2][1], width, height) +
+                            depthText + String(format: ",%.2f\n", exposure)
+                        _ = try? self.photoFile?.write(contentsOf: line.data(using: .utf8)!)
                     } catch {
-                        print("Scan recorder: could not write \(name): \(error)")
+                        self.event("kuva", "could not write \(name): \(error.localizedDescription)")
                     }
+                } else {
+                    self.event("kuva", "JPEG encoding failed: \(name)")
                 }
                 DispatchQueue.main.async { self.photoPending = false }
             }
@@ -3072,6 +3251,98 @@ final class ScanRecorder {
             d["high_res_recommended"] = format.isRecommendedForHighResolutionFrameCapturing
         }
         return d
+    }
+
+    private static func trackingName(_ state: ARCamera.TrackingState) -> String {
+        switch state {
+        case .normal: return "normal"
+        case .notAvailable: return "notAvailable"
+        case .limited(.excessiveMotion): return "limited:excessiveMotion"
+        case .limited(.insufficientFeatures): return "limited:insufficientFeatures"
+        case .limited(.initializing): return "limited:initializing"
+        case .limited(.relocalizing): return "limited:relocalizing"
+        default: return "limited:other"
+        }
+    }
+
+    private static func mappingName(_ status: ARFrame.WorldMappingStatus) -> String {
+        switch status {
+        case .notAvailable: return "notAvailable"
+        case .limited: return "limited"
+        case .extending: return "extending"
+        case .mapped: return "mapped"
+        @unknown default: return "unknown"
+        }
+    }
+
+    static func thermalName(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
+    }
+
+    /// Memory the app is charged for (the figure the system memory limit applies to), MB
+    private static func footprintMB() -> Int {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? Int(info.phys_footprint / 1_048_576) : -1
+    }
+
+    /// Device, iPadOS, build and signing for istunto.json; SkanneriCommit and SkanneriRun are added to Info.plist by the GitHub build
+    private static func deviceInfo() -> [String: Any] {
+        var system = utsname()
+        uname(&system)
+        let model = withUnsafeBytes(of: &system.machine) { String(decoding: $0.prefix(while: { $0 != 0 }), as: UTF8.self) }
+        let bundle = Bundle.main
+        var info: [String: Any] = ["laite": model, "ios": UIDevice.current.systemVersion,
+                                   "sovellus_versio": bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+                                   "commit": bundle.object(forInfoDictionaryKey: "SkanneriCommit") as? String ?? "",
+                                   "ajo": bundle.object(forInfoDictionaryKey: "SkanneriRun") as? String ?? "",
+                                   "muisti_vapaa_mt": os_proc_available_memory() / 1_048_576, "muisti_kaytossa_mt": footprintMB(),
+                                   "levy_vapaa_mt": freeBytes() / 1_048_576,
+                                   "lampo": thermalName(ProcessInfo.processInfo.thermalState),
+                                   "akku": UIDevice.current.batteryLevel, "virransaasto": ProcessInfo.processInfo.isLowPowerModeEnabled]
+        if let expiry = provisionExpiry() {
+            info["allekirjoitus_vanhenee"] = ISO8601DateFormatter().string(from: expiry)
+        }
+        return info
+    }
+
+    /// Expiry of the provisioning profile Sideloadly embedded (7 days with a free Apple ID)
+    private static func provisionExpiry() -> Date? {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: url),
+              let start = data.range(of: Data("<?xml".utf8)),
+              let end = data.range(of: Data("</plist>".utf8), in: start.lowerBound..<data.endIndex),
+              let plist = try? PropertyListSerialization.propertyList(from: data.subdata(in: start.lowerBound..<end.upperBound),
+                                                                     format: nil) as? [String: Any] else { return nil }
+        return plist["ExpirationDate"] as? Date
+    }
+
+    /// Median LiDAR depth (m) in the central 5 × 5 pixels of the depth map, nil without valid depth
+    private static func centerDepth(_ frame: ARFrame) -> Float? {
+        guard let map = frame.sceneDepth?.depthMap, CVPixelBufferGetPixelFormatType(map) == kCVPixelFormatType_DepthFloat32 else { return nil }
+        CVPixelBufferLockBaseAddress(map, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
+        let width = CVPixelBufferGetWidth(map), height = CVPixelBufferGetHeight(map), rowBytes = CVPixelBufferGetBytesPerRow(map)
+        guard let base = CVPixelBufferGetBaseAddress(map), width >= 5, height >= 5 else { return nil }
+        var values: [Float] = []
+        for y in (height / 2 - 2)...(height / 2 + 2) {
+            let row = base.advanced(by: y * rowBytes).assumingMemoryBound(to: Float32.self)
+            for x in (width / 2 - 2)...(width / 2 + 2) where row[x].isFinite && row[x] > 0 {
+                values.append(row[x])
+            }
+        }
+        return values.isEmpty ? nil : values.sorted()[values.count / 2]
     }
 
     /// Every Settings.bundle value in effect (iOS Settings → app, pages Root, Mapping and Assembling), in page order.
