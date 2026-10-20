@@ -2809,7 +2809,7 @@ extension ViewController {
     }
 }
 
-/// Writes Documents/skanneri/<yyMMdd-HHmmss>/ while mapping: istunto.json, liike.csv (ARKit camera pose at 10 Hz),
+/// Writes Documents/skanneri/<yyMMdd-HHmmss>/ while mapping: istunto.json, asetukset.json (app settings), liike.csv (ARKit camera pose at 10 Hz),
 /// puhe.wav (16 kHz mono PCM, start time in aani.json) and kuvat/*.jpg with kuvat.csv (high-resolution photos).
 /// All times are epoch seconds on the same clock as RTAB-Map node stamps (see CameraMobile stampEpochOffset_).
 final class ScanRecorder {
@@ -2862,7 +2862,7 @@ final class ScanRecorder {
         folder = dir
         folders.append(dir)
         epochOffset = Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
-        var info: [String: Any] = ["epoch_offset": epochOffset, "alku_epoch": Date().timeIntervalSince1970, "versio": "skanneri-2",
+        var info: [String: Any] = ["epoch_offset": epochOffset, "alku_epoch": Date().timeIntervalSince1970, "versio": "skanneri-3",
                                    "high_res_photos": ScanRecorder.photosEnabled, "high_res_format": ScanRecorder.highResFormatEnabled,
                                    "auto_photos": ScanRecorder.autoPhotosEnabled]
         if let format = configuration?.videoFormat {
@@ -2870,6 +2870,7 @@ final class ScanRecorder {
         }
         info["supported_formats"] = ARWorldTrackingConfiguration.supportedVideoFormats.map { ScanRecorder.describe($0) }
         writeJSON(info, to: dir.appendingPathComponent("istunto.json"))
+        writeJSON(["settings": ScanRecorder.settings()], to: dir.appendingPathComponent("asetukset.json"))
         motionFile = openCSV(dir.appendingPathComponent("liike.csv"), header: "arkit_t,epoch," + ScanRecorder.matrixHeader)
         photoFile = openCSV(dir.appendingPathComponent("kuvat.csv"),
                             header: "tiedosto,arkit_t,epoch," + ScanRecorder.matrixHeader + ",fx,fy,cx,cy,leveys,korkeus")
@@ -3039,6 +3040,8 @@ final class ScanRecorder {
     }
 
     private func writeJSON(_ object: [String: Any], to url: URL) {
+        // JSONSerialization raises an Objective-C exception (crash) on invalid objects instead of throwing
+        guard JSONSerialization.isValidJSONObject(object) else { return }
         if let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: url)
         }
@@ -3069,6 +3072,34 @@ final class ScanRecorder {
             d["high_res_recommended"] = format.isRecommendedForHighResolutionFrameCapturing
         }
         return d
+    }
+
+    /// Every Settings.bundle value in effect (iOS Settings → app, pages Root, Mapping and Assembling), in page order.
+    /// Rendering and depth settings are not stored in the database, so asetukset.json is the only record of them.
+    private static func settings() -> [[String: Any]] {
+        var result: [[String: Any]] = []
+        for page in ["Root", "Mapping", "Assembling"] {
+            guard let url = Bundle.main.url(forResource: page, withExtension: "plist", subdirectory: "Settings.bundle"),
+                  let plist = NSDictionary(contentsOf: url),
+                  let specifiers = plist["PreferenceSpecifiers"] as? [[String: Any]] else { continue }
+            var group = ""
+            for spec in specifiers {
+                if spec["Type"] as? String == "PSGroupSpecifier" {
+                    group = spec["Title"] as? String ?? ""
+                }
+                guard let key = spec["Key"] as? String else { continue }
+                let value = UserDefaults.standard.object(forKey: key) ?? spec["DefaultValue"]
+                var entry: [String: Any] = ["page": page, "group": group, "title": spec["Title"] as? String ?? key, "key": key,
+                                            "value": value ?? NSNull(), "default": spec["DefaultValue"] ?? NSNull()]
+                // Multi-value settings: also the label shown in Settings
+                if let values = spec["Values"] as? [NSObject], let titles = spec["Titles"] as? [String], let v = value as? NSObject,
+                   let i = values.firstIndex(of: v), i < titles.count {
+                    entry["value_title"] = titles[i]
+                }
+                result.append(entry)
+            }
+        }
+        return result
     }
 
     private static func freeBytes() -> Int64 {
