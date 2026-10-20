@@ -42,7 +42,7 @@
 			<key>Type</key>
 			<string>PSGroupSpecifier</string>
 			<key>FooterText</key>
-			<string>Record audio and take high-resolution photos with the camera button (optionally also automatically when still) while mapping. High-Res Video Format gives 12 MP photos but degraded tracking in our tests. Files are saved in Documents/skanneri.</string>
+			<string>Record audio and take photos with the camera button (optionally also automatically when still) while mapping. When Photos is off, the camera button is hidden. Photos are 3 MP; High-Res Video Format gives 12 MP photos but degraded tracking in our tests. Files are saved in Documents/skanneri.</string>
 		</dict>
 		<dict>
 			<key>Type</key>
@@ -58,7 +58,7 @@
 			<key>Type</key>
 			<string>PSToggleSwitchSpecifier</string>
 			<key>Title</key>
-			<string>High-Res Photos</string>
+			<string>Photos (Camera Button)</string>
 			<key>Key</key>
 			<string>HighResPhotos</string>
 			<key>DefaultValue</key>
@@ -914,7 +914,7 @@
 			<key>Type</key>
 			<string>PSGroupSpecifier</string>
 			<key>FooterText</key>
-			<string>If marker size is 0, marker size is estimated using depth camera on first detection, then the same size is assumed for next detections, thus all markers should have the same size (markers could then be detected farther from the camera). When the marker size is set &gt;0, all markers are estimated with this parameter (this can be useful on devices without depth camera). Finally, if marker size is &lt;0, the size of each marker is estimated the first time they are detected using the depth camera (thus markers can have different size). Note that if the marker is already in the database with a known size, the size contained in the database is used directly.</string>
+			<string>If marker size is 0, marker size is estimated using depth camera on first detection, then the same size is assumed for next detections, thus all markers should have the same size (markers could then be detected farther from the camera). When the marker size is set &gt;0, all markers are estimated with this parameter (this can be useful on devices without depth camera). Finally, if marker size is &lt;0, the size of each marker is estimated the first time they are detected using the depth camera (thus markers can have different size). Note that if the marker is already in the database with a known size, the size contained in the database is used directly. Decimal point and comma both work (15.4 or 15,4).</string>
 		</dict>
 		<dict>
 			<key>Type</key>
@@ -926,7 +926,7 @@
 			<key>DefaultValue</key>
 			<string>-1</string>
 			<key>KeyboardType</key>
-			<string>NumberPad</string>
+			<string>NumbersAndPunctuation</string>
 		</dict>
 		<dict>
 			<key>Type</key>

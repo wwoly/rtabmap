@@ -1584,7 +1584,8 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             rtabmap!.setMappingParameter(key: "Marker/CornerRefinementMethod", value: (markerDetection > 16 ? "3":"0"));
             rtabmap!.setMappingParameter(key: "Marker/MaxDepthError", value: defaults.string(forKey: "MarkerDepthErrorEstimation")!);
             rtabmap!.setMappingParameter(key: "Marker/MaxRange", value: defaults.string(forKey: "MarkerMaxRange")!);
-            if let val = NumberFormatter().number(from: defaults.string(forKey: "MarkerSize")!)?.doubleValue
+            // NumberFormatter() follows the region: with a decimal comma (e.g. Finland) "15.4" did not parse and the size fell back to 0
+            if let val = Double((defaults.string(forKey: "MarkerSize") ?? "").trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")), val.isFinite
             {
                 rtabmap!.setMappingParameter(key: "Marker/Length", value: String(format: "%f", val/100.0))
             }
