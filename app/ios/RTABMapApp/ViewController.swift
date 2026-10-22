@@ -1586,14 +1586,15 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             rtabmap!.setMappingParameter(key: "Marker/MaxRange", value: defaults.string(forKey: "MarkerMaxRange")!);
             // Whole millimetres, so the region's decimal separator cannot matter (with "15.4" cm and a decimal comma the size fell back to 0)
             let markerSize = (defaults.string(forKey: "MarkerSize") ?? "").trimmingCharacters(in: .whitespaces)
-            if let mm = Int(markerSize)
+            // 1-49 mm is most likely an old value in centimetres (e.g. 16), which would make the markers 10x too small
+            if let mm = Int(markerSize), mm <= 0 || mm >= 50
             {
                 rtabmap!.setMappingParameter(key: "Marker/Length", value: String(format: "%f", Double(mm)/1000.0))
             }
             else{
                 rtabmap!.setMappingParameter(key: "Marker/Length", value: "0")
                 DispatchQueue.main.async {
-                    self.showToast(message: "Marker Size \"\(markerSize)\" is not whole millimetres (e.g. 154), using 0.", seconds: 5)
+                    self.showToast(message: "Marker Size \"\(markerSize)\" is not whole millimetres of at least 50 (e.g. 154), using 0.", seconds: 5)
                 }
             }
         }
