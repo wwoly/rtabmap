@@ -1584,13 +1584,17 @@ class ViewController: GLKViewController, ARSessionDelegate, RTABMapObserver, UIP
             rtabmap!.setMappingParameter(key: "Marker/CornerRefinementMethod", value: (markerDetection > 16 ? "3":"0"));
             rtabmap!.setMappingParameter(key: "Marker/MaxDepthError", value: defaults.string(forKey: "MarkerDepthErrorEstimation")!);
             rtabmap!.setMappingParameter(key: "Marker/MaxRange", value: defaults.string(forKey: "MarkerMaxRange")!);
-            // NumberFormatter() follows the region: with a decimal comma (e.g. Finland) "15.4" did not parse and the size fell back to 0
-            if let val = Double((defaults.string(forKey: "MarkerSize") ?? "").trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")), val.isFinite
+            // Whole millimetres, so the region's decimal separator cannot matter (with "15.4" cm and a decimal comma the size fell back to 0)
+            let markerSize = (defaults.string(forKey: "MarkerSize") ?? "").trimmingCharacters(in: .whitespaces)
+            if let mm = Int(markerSize)
             {
-                rtabmap!.setMappingParameter(key: "Marker/Length", value: String(format: "%f", val/100.0))
+                rtabmap!.setMappingParameter(key: "Marker/Length", value: String(format: "%f", Double(mm)/1000.0))
             }
             else{
                 rtabmap!.setMappingParameter(key: "Marker/Length", value: "0")
+                DispatchQueue.main.async {
+                    self.showToast(message: "Marker Size \"\(markerSize)\" is not whole millimetres (e.g. 154), using 0.", seconds: 5)
+                }
             }
         }
 
